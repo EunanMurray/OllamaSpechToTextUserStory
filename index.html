@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice to User Story</title>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    max-width: 620px; margin: 40px auto; padding: 0 16px;
+    color: #111; background: #fff; line-height: 1.5;
+  }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  p.sub { color: #666; margin-top: 0; }
+  label { font-weight: 600; font-size: 14px; display: block; margin: 22px 0 6px; }
+  button {
+    font: inherit; padding: 9px 16px; border: 1px solid #111; background: #111;
+    color: #fff; border-radius: 6px; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.ghost { background: #fff; color: #111; }
+  #recordBtn.recording { background: #c0392b; border-color: #c0392b; }
+  textarea {
+    width: 100%; min-height: 80px; padding: 10px; font: inherit; font-size: 15px;
+    border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; resize: vertical;
+  }
+  .meter { height: 10px; background: #eee; border-radius: 5px; margin-top: 12px; overflow: hidden; }
+  .meter > span { display: block; height: 100%; width: 0%; background: #2ecc71; transition: width .05s linear; }
+  .status { color: #666; font-size: 13px; margin-top: 8px; min-height: 16px; }
+  pre {
+    background: #f7f7f7; border: 1px solid #e2e2e2; border-radius: 6px;
+    padding: 14px; white-space: pre-wrap; font: inherit; font-size: 14px; margin-top: 8px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; }
+</style>
+</head>
+<body>
+  <h1>Voice to User Story</h1>
+  <p class="sub">Speak a feature idea, then turn it into a user story.</p>
+
+  <label>1. Record</label>
+  <div class="row">
+    <button id="recordBtn">● Start</button>
+    <button id="clearBtn" class="ghost">Clear</button>
+  </div>
+  <div class="meter"><span id="meterBar"></span></div>
+  <div class="status" id="recStatus">Press start and speak.</div>
+
+  <label>2. Transcript</label>
+  <textarea id="transcript" placeholder="Transcribed text appears here — edit or type freely."></textarea>
+  <div class="row" style="margin-top:10px;">
+    <button id="generateBtn" disabled>Generate user story</button>
+  </div>
+
+  <label>3. User story</label>
+  <div class="status" id="genStatus">Nothing generated yet.</div>
+  <pre id="output" style="display:none;"></pre>
+  <button id="copyBtn" class="ghost" style="display:none; margin-top:10px;">Copy</button>
+
+<script>
+const $ = id => document.getElementById(id);
+const recordBtn = $('recordBtn'), clearBtn = $('clearBtn'), generateBtn = $('generateBtn');
+const transcript = $('transcript'), recStatus = $('recStatus'), genStatus = $('genStatus');
+const output = $('output'), copyBtn = $('copyBtn'), meterBar = $('meterBar');
+
+let recording = false, audioCtx, analyser, micStream, rafId;
+
+transcript.addEventListener('input', () => generateBtn.disabled = !transcript.value.trim());
+
+async function startMeter() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const tick = () => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const v of data) { const x = (v - 128) / 128; sum += x * x; }
+      const level = Math.min(100, Math.sqrt(sum / data.length) * 280);
+      meterBar.style.width = level + '%';
+      rafId = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch (e) {
+    recStatus.textContent = 'Microphone access denied or unavailable.';
+    console.error(e);
+  }
+}
+
+function stopMeter() {
+  cancelAnimationFrame(rafId);
+  meterBar.style.width = '0%';
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (audioCtx) audioCtx.close();
+}
+
+recordBtn.addEventListener('click', async () => {
+  recordBtn.disabled = true;
+  if (!recording) {
+    await fetch('/api/start', { method: 'POST' });
+    startMeter();
+    recording = true;
+    recordBtn.textContent = '■ Stop';
+    recordBtn.classList.add('recording');
+    recStatus.textContent = 'Recording… speak now.';
+  } else {
+    recStatus.textContent = 'Transcribing…';
+    stopMeter();
+    const data = await (await fetch('/api/stop', { method: 'POST' })).json();
+    recording = false;
+    recordBtn.textContent = '● Start';
+    recordBtn.classList.remove('recording');
+    transcript.value = data.transcript || '';
+    generateBtn.disabled = !(data.transcript || '').trim();
+    recStatus.textContent = data.transcript ? 'Transcribed — edit if needed.' : 'No speech detected.';
+  }
+  recordBtn.disabled = false;
+});
+
+generateBtn.addEventListener('click', async () => {
+  const text = transcript.value.trim();
+  if (!text) return;
+  generateBtn.disabled = true;
+  output.style.display = 'none';
+  copyBtn.style.display = 'none';
+  genStatus.style.display = 'block';
+  genStatus.textContent = 'Generating…';
+  try {
+    const data = await (await fetch('/api/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript: text })
+    })).json();
+    if (data.error) { genStatus.textContent = 'Error: ' + data.error; }
+    else {
+      output.textContent = data.story;
+      output.style.display = 'block';
+      copyBtn.style.display = 'inline-block';
+      genStatus.style.display = 'none';
+    }
+  } catch (e) { genStatus.textContent = 'Error: ' + e.message; }
+  generateBtn.disabled = false;
+});
+
+clearBtn.addEventListener('click', () => {
+  transcript.value = '';
+  generateBtn.disabled = true;
+  output.style.display = 'none';
+  copyBtn.style.display = 'none';
+  genStatus.style.display = 'block';
+  genStatus.textContent = 'Nothing generated yet.';
+  recStatus.textContent = 'Press start and speak.';
+});
+
+copyBtn.addEventListener('click', async () => {
+  await navigator.clipboard.writeText(output.textContent);
+  copyBtn.textContent = 'Copied!';
+  setTimeout(() => copyBtn.textContent = 'Copy', 1200);
+});
+</script>
+</body>
+</html>
