@@ -1,5 +1,10 @@
-import sys
+import threading
+
+import requests
+
 import config
+import llm
+import stt
 from stt import record_and_transcribe
 from llm import generate_user_story, get_clarifying_questions
 
@@ -18,7 +23,7 @@ def collect_clarifications(transcript: str):
     """Ask the LLM for gaps, then let the user answer each question."""
     try:
         questions = get_clarifying_questions(transcript)
-    except Exception as e:
+    except (requests.RequestException, RuntimeError) as e:
         print(f"(Skipping clarification — {e})")
         return []
 
@@ -54,12 +59,13 @@ def collect_clarifications(transcript: str):
 def main():
     print_header()
 
+    # Load both models while the user reads the prompt and speaks, so the
+    # first stop-to-story wait doesn't pay ~5s of one-time load cost.
+    threading.Thread(target=stt.warm_up, daemon=True).start()
+    threading.Thread(target=llm.warm_up, daemon=True).start()
+
     while True:
-        try:
-            transcript = record_and_transcribe()
-        except KeyboardInterrupt:
-            print("\nExiting.")
-            sys.exit(0)
+        transcript = record_and_transcribe()
 
         if not transcript:
             print("No speech detected. Try again.\n")
@@ -79,7 +85,7 @@ def main():
         print("Generating user story...", flush=True)
         try:
             story = generate_user_story(transcript, clarifications)
-        except Exception as e:
+        except (requests.RequestException, RuntimeError) as e:
             print(f"Error talking to Ollama: {e}")
             continue
 
@@ -99,4 +105,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print("\nExiting.")

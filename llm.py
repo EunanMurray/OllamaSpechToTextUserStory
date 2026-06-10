@@ -5,6 +5,13 @@ import config
 
 SYSTEM_PROMPT = """You are a senior agile product manager. Your job is to convert raw spoken input into a well-structured software user story.
 
+GROUNDING RULES — these are critical:
+- Never invent specific numbers, timeframes, rates, or thresholds that were not explicitly stated in the input.
+- Where a value is implied but not specified, use [TBD] as a placeholder (e.g. "links expire after [TBD]").
+- Where a technology is suggested but not confirmed, phrase it as a suggestion ("e.g. Redis", "consider X") rather than stating it as a decided fact.
+- Keep the output factual to what was said. The user story should reflect the speaker's intent, not implementation decisions they did not make.
+- Story Points, Priority, and Risk are best-effort estimates and may go beyond what was said; everything else must be grounded strictly in the input.
+
 Always respond using EXACTLY this format — no extra commentary before or after:
 
 Title: <short clear title>
@@ -53,16 +60,45 @@ If nothing is truly missing, return exactly: []
 Output nothing except the JSON array."""
 
 
+_session = requests.Session()
+
+
+def warm_up():
+    """Best-effort: load the model into Ollama's RAM ahead of the first real request.
+
+    An empty prompt makes Ollama load the model and return immediately
+    (~4s cold, instant if already loaded). Failures are ignored — the
+    first real request will surface any genuine problem.
+    """
+    try:
+        requests.post(
+            config.OLLAMA_URL,
+            json={
+                "model": config.OLLAMA_MODEL,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": config.OLLAMA_KEEP_ALIVE,
+            },
+            timeout=config.OLLAMA_TIMEOUT,
+        )
+    except requests.RequestException:
+        pass
+
+
 def _ollama_generate(system_prompt: str, prompt: str) -> str:
     payload = {
         "model": config.OLLAMA_MODEL,
         "system": system_prompt,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": config.OLLAMA_KEEP_ALIVE,
     }
-    response = requests.post(config.OLLAMA_URL, json=payload, timeout=120)
+    response = _session.post(config.OLLAMA_URL, json=payload, timeout=config.OLLAMA_TIMEOUT)
     response.raise_for_status()
-    return response.json()["response"].strip()
+    data = response.json()
+    if "response" not in data:
+        raise RuntimeError(f"Unexpected Ollama reply: {data.get('error', data)}")
+    return data["response"].strip()
 
 
 def get_clarifying_questions(transcript: str) -> list:
